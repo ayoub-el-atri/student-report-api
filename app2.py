@@ -36,6 +36,7 @@ def add_student():
 
 @app.post("/student/<int:student_id>/report")
 def add_report(student_id):
+    request_data = request.get_json()
     student = next((s for s in students if s["id"] == student_id),  None)
     if not student:
         return {"message": "Student not found"}, 404
