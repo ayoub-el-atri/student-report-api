@@ -1,24 +1,23 @@
 from flask import Flask, jsonify, request
 from functools import wraps
-import jwt, datetime
+import jwt, datetime, uuid
+import mysql.connector
+from db import run_query, run_execute
 
 app = Flask(__name__)
 SECRET_KEY = "token-key"
 
-students = [
-    {"id_s": 1, "first_name": "Amine",   "last_name": "Ben Salah", "double_major": 0, "level": "Senior"},
-    {"id_s": 2, "first_name": "Amira",   "last_name": "Trabelsi",  "double_major": 1, "level": "Senior"},
-    {"id_s": 3, "first_name": "Yassine", "last_name": "Mejri",     "double_major": 0, "level": "Senior"},
-]
-
-reports = [
-    {"id_r": 1, "id_s": 1, "title": "Stock Price Prediction", "type": "PFE",
-     "k1": "Finance", "k2": "Time Series", "k3": "Python", "release_date": "2026-06-15"},
-    {"id_r": 2, "id_s": 2, "title": "Defect Recognition System", "type": "Senior Project",
-     "k1": "Computer Vision", "k2": "Machine Learning", "k3": "Python", "release_date": "2026-06-20"},
-]
-
 USERS = {"admin": "adminpwd"}
+
+
+def is_valid_uuid(value):
+    try:
+        return str(uuid.UUID(str(value))) == str(value).lower()
+    except ValueError:
+        return False
+
+
+
 
 def make_token(username, token_type, minutes):
     payload = {
@@ -72,15 +71,18 @@ def refresh():
 def home():
     return jsonify({"message": "Student & Reports API is running"}), 200
 
+
 @app.route("/students", methods=["GET"])
 @token_required
 def get_students():
-    return jsonify(students), 200
+    return jsonify(run_query("SELECT * FROM students")), 200
 
-@app.route("/students/<int:id_s>", methods=["GET"])
+@app.route("/students/<id_s>", methods=["GET"])
 @token_required
 def get_student(id_s):
-    student = next((s for s in students if s["id_s"] == id_s), None)
+    if not is_valid_uuid(id_s):
+        return jsonify({"error": "id_s must be a valid UUID"}), 400
+    student = run_query("SELECT * FROM students WHERE id_s = %s", (id_s,), one=True)
     if student is None:
         return jsonify({"error": "Student not found"}), 404
     return jsonify(student), 200
@@ -89,29 +91,33 @@ def get_student(id_s):
 @token_required
 def add_student():
     body = request.get_json(silent=True)
-    required = ["first_name", "last_name", "double_major", "level"]
+    required = ["fname", "lname", "double_major", "level"]
     if not body or any(field not in body for field in required):
         return jsonify({"error": f"Required fields: {', '.join(required)}"}), 400
     if body["double_major"] not in (0, 1):
         return jsonify({"error": "double_major must be 0 or 1"}), 400
 
-    new_student = {
-        "id_s": max((s["id_s"] for s in students), default=0) + 1,
-        "first_name": body["first_name"],
-        "last_name": body["last_name"],
-        "double_major": body["double_major"],
-        "level": body["level"],
-    }
-    students.append(new_student)
-    return jsonify(new_student), 201
+    new_id = str(uuid.uuid4())          
+    run_execute(
+        "INSERT INTO students (id_s, fname, lname, double_major, level) "
+        "VALUES (%s, %s, %s, %s, %s)",
+        (new_id, body["fname"], body["lname"], body["double_major"], body["level"]),
+    )
+    student = run_query("SELECT * FROM students WHERE id_s = %s", (new_id,), one=True)
+    return jsonify(student), 201
+
+
+REPORT_COLS = ("id_r, id_s, title, type, k1, k2, k3")
 
 @app.route("/reports", methods=["GET"])
 def get_reports():
-    return jsonify(reports), 200
+    return jsonify(run_query(f"SELECT {REPORT_COLS} FROM reports")), 200
 
-@app.route("/reports/<int:id_r>", methods=["GET"])
+@app.route("/reports/<id_r>", methods=["GET"])
 def get_report(id_r):
-    report = next((r for r in reports if r["id_r"] == id_r), None)
+    if not is_valid_uuid(id_r):
+        return jsonify({"error": "id_r must be a valid UUID"}), 400
+    report = run_query(f"SELECT {REPORT_COLS} FROM reports WHERE id_r = %s", (id_r,), one=True)
     if report is None:
         return jsonify({"error": "Report not found"}), 404
     return jsonify(report), 200
@@ -119,31 +125,74 @@ def get_report(id_r):
 @app.route("/reports", methods=["POST"])
 def add_report():
     body = request.get_json(silent=True)
-    required = ["id_s", "title", "type", "k1", "k2", "k3", "release_date"]
+    required = ["id_s", "title", "type", "k1", "k2", "k3"]
     if not body or any(field not in body for field in required):
         return jsonify({"error": f"Required fields: {', '.join(required)}"}), 400
+    if not is_valid_uuid(body["id_s"]):
+        return jsonify({"error": "id_s must be a valid UUID"}), 400
 
-    student = next((s for s in students if s["id_s"] == body["id_s"]), None)
+    student = run_query("SELECT * FROM students WHERE id_s = %s", (body["id_s"],), one=True)
     if student is None:
         return jsonify({"error": "Student does not exist"}), 404
 
     allowed = 2 if student["double_major"] == 1 else 1
-    already = sum(1 for r in reports if r["id_s"] == student["id_s"])
+    already = run_query("SELECT COUNT(*) AS n FROM reports WHERE id_s = %s",
+                        (body["id_s"],), one=True)["n"]
     if already >= allowed:
         return jsonify({"error": f"Student already has {already} report(s); maximum is {allowed}"}), 409
 
-    new_report = {
-        "id_r": max((r["id_r"] for r in reports), default=0) + 1,
-        "id_s": body["id_s"],
-        "title": body["title"],
-        "type": body["type"],
-        "k1": body["k1"],
-        "k2": body["k2"],
-        "k3": body["k3"],
-        "release_date": body["release_date"],
-    }
-    reports.append(new_report)
-    return jsonify(new_report), 201
+    new_id = str(uuid.uuid4())          
+    try:
+        run_execute(
+            "INSERT INTO reports (id_r, id_s, title, type, k1, k2, k3) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (new_id, body["id_s"], body["title"], body["type"],
+             body["k1"], body["k2"], body["k3"]),
+        )
+    except mysql.connector.Error:
+        return jsonify({"error": "Database error, check your data"}), 400
+
+    report = run_query(f"SELECT {REPORT_COLS} FROM reports WHERE id_r = %s", (new_id,), one=True)
+    return jsonify(report), 201
+
+@app.route("/reports/<id_r>", methods=["PUT"])
+def update_report(id_r):
+    if not is_valid_uuid(id_r):
+        return jsonify({"error": "id_r must be a valid UUID"}), 400
+
+    body = request.get_json(silent=True)
+    required = ["title", "type", "k1", "k2", "k3"]
+    if not body or any(field not in body for field in required):
+        return jsonify({"error": f"Required fields: {', '.join(required)}"}), 400
+
+    existing = run_query("SELECT id_r FROM reports WHERE id_r = %s", (id_r,), one=True)
+    if existing is None:
+        return jsonify({"error": "Report not found"}), 404
+
+    try:
+        run_execute(
+            "UPDATE reports SET title=%s, type=%s, k1=%s, k2=%s, k3=%s "
+            "WHERE id_r=%s",
+            (body["title"], body["type"], body["k1"], body["k2"],
+             body["k3"], id_r),
+        )
+    except mysql.connector.Error:
+        return jsonify({"error": "Database error, check your data"}), 400
+
+    report = run_query(f"SELECT {REPORT_COLS} FROM reports WHERE id_r = %s", (id_r,), one=True)
+    return jsonify(report), 200
+
+@app.route("/reports/<id_r>", methods=["DELETE"])
+def delete_report(id_r):
+    if not is_valid_uuid(id_r):
+        return jsonify({"error": "id_r must be a valid UUID"}), 400
+
+    existing = run_query("SELECT id_r FROM reports WHERE id_r = %s", (id_r,), one=True)
+    if existing is None:
+        return jsonify({"error": "Report not found"}), 404
+
+    run_execute("DELETE FROM reports WHERE id_r = %s", (id_r,))
+    return jsonify({"message": f"Report {id_r} deleted"}), 200
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000,debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True)

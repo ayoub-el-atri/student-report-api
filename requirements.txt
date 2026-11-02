@@ -1,2 +1,4 @@
 flask
 pyJWT
+flask_smorest
+python .dotenv
